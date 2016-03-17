@@ -28,15 +28,17 @@ class MID:
             self.handler = strfanalysis.STRFAnalyzer()
         else:
             self.handler = handler
-            
+        
+        self.nbins = nbins
         self.ndim = ndim
-        self.vecs = np.zeros(self.ndim, np.prod(self.handler.stimshape))
-        for d in self.ndim:
-            self.vecs[d] = self.vec_init()
-        self.binbounds = self.decide_bins(nbins=nbins)
+        self.vecs = np.zeros((self.ndim, np.prod(self.handler.stimshape)))
+        for d in range(self.ndim):
+            init = self.vec_init()
+            self.vecs[d,:] = init
+        self.binbounds = self.decide_bins()
         
         
-    def vec_init(self, method='random'):
+    def vec_init(self, method=None):
         """If random, return a random normalized vector. Otherwise return a random normalized stimulus."""
         try:
             if method =='random':
@@ -50,7 +52,7 @@ class MID:
             print('Specialized initialization failed. Falling back on random early stimulus.')
             stims = np.zeros(1000, np.prod(self.handler.stimshape))
             index = 0
-            for stim in self.handler.generator():
+            for stim, _ in self.handler.generator():
                 if index>=1000:
                     break
                 stims[index] = stim
@@ -59,11 +61,9 @@ class MID:
         vec = vec/np.linalg.norm(vec)
         return np.array(vec)
             
-    def decide_bins(self, vecs=None, nbins = None, edgefrac = None):
-        if nbins is None:
-            nbins=self.nbins
+    def decide_bins(self, vecs=None, edgefrac = None):
         if edgefrac is None:
-            edgefrac = 1/(5*nbins)
+            edgefrac = 1/(5*self.nbins)
         if vecs is None:
             vecs = self.vecs
         nstim = self.handler.get_nstim()
@@ -72,14 +72,14 @@ class MID:
         for stim,_ in self.handler.generator():
             projections[:,ii]=vecs.dot(stim)
             ii+=1
-        projections = np.sort(projections,0)
+        projections = np.sort(projections,-1)
         bottomind = int(nstim*edgefrac/2)
         topind = nstim - bottomind
         bottoms = projections[:,bottomind]
         tops = projections[:,topind]
-        self.binbounds =  np.zeros((self.ndim, self.nbins))
-        for d in self.ndim:
-            self.binbounds[d] = np.linspace(bottoms[d], tops[d], nbins-1)        
+        self.binbounds =  np.zeros((self.ndim, self.nbins-1))
+        for d in range(self.ndim):
+            self.binbounds[d] = np.linspace(bottoms[d], tops[d], self.nbins-1)        
         return self.binbounds
             
     def bin_ind(self, val, dim=0):
@@ -111,7 +111,8 @@ class MID:
             vecs = self.vvecs
         self.decide_bins(vecs=vecs) 
         
-        pv = np.zeros(self.nbins*np.ones(self.ndim)) # prob dist of projections
+        projspaceshape = tuple(self.nbins*np.ones(self.ndim))
+        pv = np.zeros(projspaceshape) # prob dist of projections
         pvt = np.zeros_like(pv) # prob dist of projections given spike (t for trigger)
         for stim, sp in self.handler.generator():
             proj = vecs.dot(stim)
@@ -142,10 +143,11 @@ class MID:
         If neg, returns minus these things."""
         self.decide_bins(vecs=vecs)        
         
-        pv = np.zeros(self.nbins*np.ones(self.ndim)) # prob dist of projections
+        projspaceshape = tuple(self.nbins*np.ones(self.ndim))
+        pv = np.zeros(projspaceshape) # prob dist of projections
         pvt = np.zeros_like(pv) # prob dist of projections given spike (t for trigger)
-        # the averages have shape (nbins)**ndim * stimlength; i.e., one average per n-dimensional bin
-        sv = np.zeros(tuple(np.concatenate([self.nbins*np.ones(self.ndim),[np.prod(self.handler.stimshape)]]))) # mean stim given projection
+        # the averages have shape (nbins)**ndim * stimlength; i.e., one average per ndim-dimensional bin
+        sv = np.zeros(projspaceshape + (np.prod(self.handler.stimshape),)) # mean stim given projection
         svt = np.zeros_like(sv) # mean stim given projection and spike
         nstims = 0
         nspikes = 0
@@ -166,19 +168,29 @@ class MID:
         # to avoid dividing by zero I make zeros equal the next smallest possible value, which may cause problems if there are a lot of zeros
         safepv = np.copy(pv)
         safepv[safepv==0] = 1./nstims
-        sv = (sv/nstims)/safepv[:,np.newaxis]
+        sv = (sv/nstims)/(safepv[...,np.newaxis])
         safepvt = np.copy(pvt)
         safepvt[safepvt==0] = 1./nspikes
-        svt = (svt/nspikes)/safepvt[:,np.newaxis]
+        svt = (svt/nspikes)/(safepvt[...,np.newaxis])
         
         # Compute the derivative of the probability ratio wrt bin. 
         deriv = np.gradient(pvt/safepv) # uses 2nd order method
-        deriv = np.stack(deriv) # deriv returns a list of arrays, convert to array
-        # above is dthing/dbin_i, we want dthing/dx_i. The distinction may matter if bin widths vary between dimensions, otherwise it's just a scaling
-        deriv = deriv/(self.binbounds[:,1]-self.binbounds[:,0])
-                
-        grad = np.sum(pv[np.newaxis,...,np.newaxis]*(svt-sv)[np.newaxis,...]*deriv[...,np.newaxis],axis=tuple(np.arange(self.ndim)))
+        
+        # get the shape right
+        try:
+            deriv.shape # should raise AttributeError when ndim>1. see except block below
+            deriv = deriv[np.newaxis,:] # add axis for manipulations below
+        except AttributeError:
+            deriv = np.stack(deriv) # deriv returns a list of arrays, convert to array
 
+        # above is dthing/dbin_i, we want dthing/dx_i. The distinction may matter if bin widths vary between dimensions, otherwise it's just a scaling
+        deriv = deriv/(self.binbounds[:,1]-self.binbounds[:,0]).reshape((self.ndim,) + tuple(np.ones(self.ndim)))
+        
+        assert deriv.shape == (self.ndim,) + projspaceshape
+                
+        grad = np.sum(pv[np.newaxis,...,np.newaxis]*(svt-sv)[np.newaxis,...]*deriv[...,np.newaxis],axis=tuple(np.arange(self.ndim)+1))
+        assert grad.shape == (self.ndim,) + (np.prod(self.handler.stimshape),)
+        
         info = 0
         flatpv = safepv.flatten()
         flatpvt = pvt.flatten()
@@ -254,7 +266,7 @@ class MID:
             mes = "Did not converge to desired precision."
         return SimpleResult(vecs, mes, history=infohist)
         
-    def optimize(self, method='BFGS', rate=1e-6, maxiter=100):
+    def optimize(self, method='BFGS', rate=1e-6, maxiter=100, params=None):
         if method == 'BFGS':
             result = minimize(self.info_grad,self.vecs,method=method, jac=True, options={'disp':True, 'maxiter':maxiter})
         elif method == 'Nelder-Mead':
@@ -262,7 +274,7 @@ class MID:
         elif method == 'GA':
             result = self.grad_ascent(self.vecs,rate, maxiter=maxiter)
         elif method == 'GA_with_linemax':
-            result = self.GA_with_linemax(self.vecs, maxiter=maxiter)
+            result = self.GA_with_linemax(self.vecs, maxiter=maxiter, params=params)
         else:
             return SimpleResult(self.vecs, "No valid method provided. Did nothing.")
         
