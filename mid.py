@@ -7,24 +7,33 @@ Created on Tue Feb 16 16:52:02 2016
 
 import numpy as np
 from scipy.optimize import minimize
-import os
-cwd = os.getcwd()
 strfandir = '../../cell attached analyzed 2015/'
-os.chdir(strfandir)
+import sys
+sys.path.append(strfandir)
 import strfanalysis
-os.chdir(cwd)
 
 class MID:
-    """A class to find the maximally informative stimulus dimensions for given stimuli and spikes."""
+    """
+    Maximally informative dimensions. 
+    A class to find the linear subspace of the stimulus space that maximizes 
+    mutual information between spike arrival times and the projections of 
+    stimuli onto that linear subspace.
+    """
     
     def __init__(self, handler=None, ndim=1, nbins=15):
-        """Input: handler, an object with a generator() method that returns an iterator
-        over (stim, spikecount) pairs. handler also needs a stimshape attribute."""
+        """
+        Create an MID object to analyze data in handler.
+        
+        The handler object must have a generator() method that returns an 
+        iterator over (stim, spikecount) pairs.
+        
+        Parameters
+        ----------
+        handler : an object with a generator() method
+        ndim : the (fixed) size of the "relevant subspace" (RS)
+        nbins : number bins in each direction of RS projection histogram
+        """
         if handler is None:
-            try:
-                os.chdir(strfandir)
-            except:
-                pass
             self.handler = strfanalysis.STRFAnalyzer()
         else:
             self.handler = handler
@@ -32,19 +41,27 @@ class MID:
         self.nbins = nbins
         self.ndim = ndim
         self.vecs = np.zeros((self.ndim, np.prod(self.handler.stimshape)))
-        for d in range(self.ndim):
+        for dd in range(self.ndim):
             init = self.vec_init()
-            self.vecs[d,:] = init
+            self.vecs[dd,:] = init
         self.binbounds = self.decide_bins()
         
         
     def vec_init(self, method=None):
-        """If random, return a random normalized vector. Otherwise return a random normalized stimulus."""
+        """
+        Get a vector for initialization.
+        
+        Parameters
+        ----------
+        method : random -> return a random normalized vector
+                 sta -> return an estimate of the spike-triggered average stim
+                 otherwise -> return a random normalized stimulus
+        """
         try:
-            if method =='random':
+            if method == 'random':
                 length = np.prod(self.handler.stimshape)
                 vec = np.random.randn(length)
-            elif method=='sta':
+            elif method == 'sta':
                 vec = self.handler.get_STA() - self.handler.get_stimave()
             else:
                 vec = self.handler.rand_stimresp(1)[0][0]
@@ -56,59 +73,78 @@ class MID:
                 if index>=1000:
                     break
                 stims[index] = stim
-                index+=1
+                index += 1
             vec = stims[np.random.choice(1000)]
         vec = vec/np.linalg.norm(vec)
         return np.array(vec)
             
-    def decide_bins(self, vecs=None, edgefrac = None):
+    def decide_bins(self, vecs=None, edgefrac=None):
+        """
+        Decide the boundaries of RS projection histogram bins.
+        
+        Parameters
+        ----------
+        vecs : (ndim, stimsize): vectors spanning the RS (self.vecs by default)
+        edgefrac : fraction of stimuli in the two edge bins (half this in each)
+        
+        Returns
+        -------
+        (ndim, nbins-1) array of boundaries between bins in each dimension.
+        
+        
+        """
         if edgefrac is None:
             edgefrac = 1/(5*self.nbins)
         if vecs is None:
             vecs = self.vecs
         nstim = self.handler.get_nstim()
         projections = np.zeros((self.ndim,nstim))
-        ii=0
-        for stim,_ in self.handler.generator():
-            projections[:,ii]=vecs.dot(stim)
-            ii+=1
+        ii = 0
+        for stim, _ in self.handler.generator():
+            projections[:,ii] = vecs.dot(stim)
+            ii += 1
         projections = np.sort(projections,-1)
         bottomind = int(nstim*edgefrac/2)
         topind = nstim - bottomind
         bottoms = projections[:,bottomind]
         tops = projections[:,topind]
-        self.binbounds =  np.zeros((self.ndim, self.nbins-1))
+        self.binbounds = np.zeros((self.ndim, self.nbins-1))
         for d in range(self.ndim):
             self.binbounds[d] = np.linspace(bottoms[d], tops[d], self.nbins-1)        
         return self.binbounds
             
     def bin_ind(self, val, dim=0):
-        """Returns the index of the bin of projection values into which val falls."""    
+        """Return index of bin of projection values into which val falls."""    
         for ind in range(len(self.binbounds[dim])):
             if val < self.binbounds[dim,ind]:
                 return ind
         return ind+1
 
     def info_est(self):
-        """Returns an estimate of the info/spike. Possibly a bad estimate if each stimulus is seen only once.
-        Currently only works for STRFAnalyzer handler or equivalent."""
-        # I don't know how accurate this is.
+        """
+        Returns an estimate of the info/spike. 
+        Possibly a bad estimate if each stimulus is seen only once.
+        Currently only works for STRFAnalyzer handler or equivalent.
+        """
         Ispike = 0
+        nstim = self.handler.nstim
+        nspikes = self.handler.nspikes
         for name in np.unique(self.handler.namelist):
             inds = np.where(np.array(self.handler.namelist) == name)[0]
-            combtrain = np.zeros(np.max(self.handler.triallengths[inds])) # assuming triallengths are all about the same
+            # zero-padding assumes triallengths are all about the same
+            combtrain = np.zeros(np.max(self.handler.triallengths[inds]))
             for ii in inds:
                 combtrain = combtrain + self.handler.spiketrain(ii)
             combtrain = combtrain/(inds.shape[-1])
             for prob in combtrain:
                 if prob>0:
-                    Ispike = Ispike + prob*np.log2(prob*self.handler.nstim/self.handler.nspikes)
-        return Ispike/self.handler.nspikes
+                    Ispike +=  prob*np.log2(prob*nstim/nspikes)
+        return Ispike/nspikes
     
     def info_and_dists(self,vecs=None, neg=True):
         """Returns the mutual information between spike arrival times and the projections along vecs."""
         if vecs is None:
-            vecs = self.vvecs
+            vecs = self.vecs
         self.decide_bins(vecs=vecs) 
         
         projspaceshape = tuple(self.nbins*np.ones(self.ndim))
@@ -125,7 +161,7 @@ class MID:
         pv = pv/nstims
         pvt = pvt/nspikes
         safepv = np.copy(pv)
-        safepv[safepv==0] = 1./nstims # prevents divide by zero errors when 0/0 below
+        safepv[safepv == 0] = 1./nstims # prevents divide by zero errors when 0/0 below
         info = 0 
         flatpv = safepv.flatten()
         flatpvt = pvt.flatten()
@@ -135,8 +171,8 @@ class MID:
         return factor*info, pv, pvt
     
     def info(self, vecs=None, neg=True):
-        return self.info_and_dists(vecs,neg)[0]
-        
+        """Returns only mutual information estimate from info_and_dists()"""
+        return self.info_and_dists(vecs,neg)[0]        
     
     def info_grad(self, vecs, neg=True):
         """Return the information as in infov, and the gradient of the same with respect to v.
@@ -167,16 +203,16 @@ class MID:
         
         # to avoid dividing by zero I make zeros equal the next smallest possible value, which may cause problems if there are a lot of zeros
         safepv = np.copy(pv)
-        safepv[safepv==0] = 1./nstims
+        safepv[safepv == 0] = 1./nstims
         sv = (sv/nstims)/(safepv[...,np.newaxis])
         safepvt = np.copy(pvt)
-        safepvt[safepvt==0] = 1./nspikes
+        safepvt[safepvt == 0] = 1./nspikes
         svt = (svt/nspikes)/(safepvt[...,np.newaxis])
         
         # Compute the derivative of the probability ratio wrt bin. 
         deriv = np.gradient(pvt/safepv) # uses 2nd order method
         
-        # get the shape right
+        # get the shape right (np.gradient squeezes singleton dimension)
         try:
             deriv.shape # should raise AttributeError when ndim>1. see except block below
             deriv = deriv[np.newaxis,:] # add axis for manipulations below
@@ -184,7 +220,7 @@ class MID:
             deriv = np.stack(deriv) # deriv returns a list of arrays, convert to array
 
         # above is dthing/dbin_i, we want dthing/dx_i. The distinction may matter if bin widths vary between dimensions, otherwise it's just a scaling
-        deriv = deriv/(self.binbounds[:,1]-self.binbounds[:,0]).reshape((self.ndim,) + tuple(np.ones(self.ndim)))
+        deriv /= (self.binbounds[:,1]-self.binbounds[:,0]).reshape((self.ndim,) + tuple(np.ones(self.ndim)))
         
         assert deriv.shape == (self.ndim,) + projspaceshape
                 
@@ -202,19 +238,18 @@ class MID:
     def grad_ascent(self, vecs, rate, gtol=1e-6, maxiter=100):
         """Runs simple gradient ascent with a constant rate, until either the tolerance is achieved or maxiter iterations."""
         gnorm = 2*gtol
-        it=0
-        infohist=[]
+        infohist = []
         print('Info             Gradient norm')
         for it in range(maxiter):
             info, grad = self.info_grad(vecs,neg=False)
             infohist.append(info)
             gnorm = np.linalg.norm(grad)
-            if gnorm<gtol:
+            if gnorm < gtol:
                 break
             print(str(info)+'  '+str(gnorm))
             vecs = vecs + rate*grad 
         print(str(info)+'  '+str(gnorm))
-        if gnorm<gtol:
+        if gnorm < gtol:
             mes = "Converged to desired precision."
         else:
             mes = "Did not converge to desired precision."
@@ -224,7 +259,7 @@ class MID:
     def line_max_backtrack(self, vecs, initinfo, grad, params=None):
         if params is None:
             params = BacktrackingParams()
-        bestinfo=initinfo
+        bestinfo = initinfo
         step = params.maxstep
         beststep = 0
         goodenough = np.linalg.norm(grad)*params.acceptable
@@ -241,14 +276,15 @@ class MID:
         print("Updating with best found step size " + str(beststep))
         return beststep
     
-    def GA_with_linemax(self, vecs, gtol=1e-5, maxiter=100, params=None):
+    def GA_with_linemax(self, vecs, gtol=1e-5, params=None):
+        if params is None:
+            params = BacktrackingParams()
         gnorm = 2*gtol
-        it=0
-        infohist=[]
+        infohist = []
         print('Info             Gradient norm')
-        for it in range(maxiter):
+        for it in range(params.maxiter):
             info, grad = self.info_grad(vecs,neg=False)
-            assert infohist==[] or info > infohist[-1]
+            assert infohist == [] or info > infohist[-1]
             infohist.append(info)
             gnorm = np.linalg.norm(grad)
             if gnorm < gtol:
@@ -260,11 +296,23 @@ class MID:
                 break
             vecs = vecs + step*grad
         print(str(info)+'  '+str(gnorm))
-        if gnorm<gtol:
+        if gnorm < gtol:
             mes = "Converged to desired precision."
         else:
             mes = "Did not converge to desired precision."
-        return SimpleResult(vecs, mes, history=infohist)
+        return SimpleResult(vecs, mes, history=infohist, params=params)
+        
+    def planned_GA(self, vecs, gtol=1e-3, plan=[1000,1000]):
+        results = []
+        rate = .1
+        for maxiter in plan:
+            results.append(self.grad_ascent(vecs, rate, gtol=gtol, maxiter=maxiter))
+            vecs = results[-1].x
+            rate = rate/10
+        final = self.GA_with_linemax(results[-1].x, gtol=gtol, params=BacktrackingParams(maxiter=100))
+        for res in results:
+            final.history = final.history + res.history
+        return final
         
     def optimize(self, method='BFGS', rate=1e-6, maxiter=100, params=None):
         if method == 'BFGS':
@@ -274,7 +322,9 @@ class MID:
         elif method == 'GA':
             result = self.grad_ascent(self.vecs,rate, maxiter=maxiter)
         elif method == 'GA_with_linemax':
-            result = self.GA_with_linemax(self.vecs, maxiter=maxiter, params=params)
+            result = self.GA_with_linemax(self.vecs, params=params)
+        elif method == 'planned':
+            result = self.planned_GA(self.vecs, plan=params)
         else:
             return SimpleResult(self.vecs, "No valid method provided. Did nothing.")
         
